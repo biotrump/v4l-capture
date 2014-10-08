@@ -29,11 +29,15 @@
 #include <opencv2/highgui/highgui.hpp>
 #include <opencv2/imgproc/imgproc.hpp>
 
-
 #define FORCED_WIDTH  640
 #define FORCED_HEIGHT 480
-#define FORCED_FORMAT V4L2_PIX_FMT_MJPEG	//V4L2_PIX_FMT_YUYV	//	//
+#define FORCED_FORMAT V4L2_PIX_FMT_YUYV	//V4L2_PIX_FMT_MJPEG
 #define FORCED_FIELD  V4L2_FIELD_ANY
+
+/*http://forum.processing.org/one/topic/webcam-with-stable-framerate-25fps-on-high-resolution.html
+The stable fps can only occur in the low frame rate. Higher fps>15 may not be stable.
+*/
+#define FORCED_FPS		(10)
 
 static int verbose = 0;
 #define pr_debug(fmt, arg...) \
@@ -80,6 +84,512 @@ static int xioctl(int fh, int request, void *arg)
 	return r;
 }
 
+int QueryCap(int fd, struct v4l2_capability *pcaps)
+{
+    struct v4l2_capability caps = {0};
+    if (-1 == xioctl(fd, VIDIOC_QUERYCAP, pcaps)){
+        perror("Querying Capabilities");
+        return 1;
+    }
+    return 0;
+}
+
+int QueryCropCap(int fd, struct v4l2_cropcap *pcropcap)
+{
+    pcropcap->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (-1 == xioctl (fd, VIDIOC_CROPCAP, pcropcap)) {
+        perror("Querying Cropping Capabilities");
+        return 1;
+    }
+}
+
+int GetAutoWhiteBalance(int fd)
+{
+	struct v4l2_control ctrl ={0};
+	ctrl.id = V4L2_CID_AUTO_WHITE_BALANCE;
+	if (-1 == xioctl(fd, VIDIOC_G_CTRL, &ctrl)){
+		perror("getting V4L2_CID_AUTO_WHITE_BALANCE");
+	}
+//	printf("V4L2_CID_AUTO_WHITE_BALANCE = 0x%x\n",ctrl.value );
+	return ctrl.value;
+}
+
+int SetAutoWhiteBalance(int fd, int enable)
+{
+	struct v4l2_control ctrl ={0};
+	ctrl.id = V4L2_CID_AUTO_WHITE_BALANCE;
+	ctrl.value = enable;
+	if (-1 == xioctl(fd, VIDIOC_S_CTRL, &ctrl)){
+		perror("setting V4L2_CID_AUTO_WHITE_BALANCE");
+	}
+//	printf("V4L2_CID_AUTO_WHITE_BALANCE = (0x%x -> 0x%x)\n",enable, GetAutoWhiteBalance(fd) );
+	return GetAutoWhiteBalance(fd) == enable;
+}
+
+/* v4l2-controls.h
+enum  v4l2_exposure_auto_type {
+	V4L2_EXPOSURE_AUTO = 0,
+	V4L2_EXPOSURE_MANUAL = 1,
+	V4L2_EXPOSURE_SHUTTER_PRIORITY = 2,
+	V4L2_EXPOSURE_APERTURE_PRIORITY = 3
+};
+V4L2_CID_EXPOSURE_AUTO 	enum v4l2_exposure_auto_type
+ 	Enables automatic adjustments of the exposure time and/or iris aperture.
+ 	The effect of manual changes of the exposure time or iris aperture while
+ 	these features are enabled is undefined, drivers should ignore such requests.
+ 	Possible values are:
+	V4L2_EXPOSURE_AUTO 	Automatic exposure time, automatic iris aperture.
+	V4L2_EXPOSURE_MANUAL 	Manual exposure time, manual iris.
+	V4L2_EXPOSURE_SHUTTER_PRIORITY 	Manual exposure time, auto iris.
+	V4L2_EXPOSURE_APERTURE_PRIORITY 	Auto exposure time, manual iris.
+
+V4L2_CID_EXPOSURE_ABSOLUTE 	integer
+ 	Determines the exposure time of the camera sensor. The exposure time is
+ 	limited by the frame interval. Drivers should interpret the values as 100 µs
+ 	units, where the value 1 stands for 1/10000th of a second, 10000 for
+ 	1 second and 100000 for 10 seconds.
+
+V4L2_CID_EXPOSURE_AUTO_PRIORITY 	boolean
+ 	When V4L2_CID_EXPOSURE_AUTO is set to AUTO or APERTURE_PRIORITY, this
+ 	control determines if the device may dynamically vary the frame rate.
+ 	By default this feature is disabled (0) and the frame rate must remain constant.
+
+V4L2_CID_EXPOSURE_BIAS 	integer menu
+ 	Determines the automatic exposure compensation, it is effective only
+ 	when V4L2_CID_EXPOSURE_AUTO control is set to AUTO, SHUTTER_PRIORITY or
+ 	APERTURE_PRIORITY. It is expressed in terms of EV, drivers should interpret
+ 	the values as 0.001 EV units, where the value 1000 stands for +1 EV.
+	Increasing the exposure compensation value is equivalent to decreasing the
+	exposure value (EV) and will increase the amount of light at the image
+	sensor. The camera performs the exposure compensation by adjusting absolute
+	exposure time and/or aperture.
+
+V4L2_CID_EXPOSURE_METERING 	enum v4l2_exposure_metering
+ 	Determines how the camera measures the amount of light available for the
+ 	frame exposure. Possible values are:
+
+	V4L2_EXPOSURE_METERING_AVERAGE 	Use the light information coming from the
+		entire frame and average giving no weighting to any particular portion of
+		the metered area.
+	V4L2_EXPOSURE_METERING_CENTER_WEIGHTED 	Average the light information coming
+		from the entire frame giving priority to the center of the metered area.
+	V4L2_EXPOSURE_METERING_SPOT 	Measure only very small area at the center
+		of the frame.
+	V4L2_EXPOSURE_METERING_MATRIX 	A multi-zone metering. The light intensity
+		is measured in several points of the frame and the the results are
+		combined. The algorithm of the zones selection and their significance
+		in calculating the final value is device dependent.
+*/
+static void autoExposureType(int type)
+{
+#if 1	//__debug_log_
+   	switch(type){
+   	case V4L2_EXPOSURE_AUTO:
+   		printf("V4L2_EXPOSURE_AUTO[%d]\n",type);
+   		break;
+   	case V4L2_EXPOSURE_MANUAL:
+   		printf("V4L2_EXPOSURE_MANUAL[%d]\n",type);
+   		break;
+   	case V4L2_EXPOSURE_SHUTTER_PRIORITY:
+   		printf("V4L2_EXPOSURE_SHUTTER_PRIORITY[%d]\n",type);
+   		break;
+   	case V4L2_EXPOSURE_APERTURE_PRIORITY:
+   		printf("V4L2_EXPOSURE_APERTURE_PRIORITY[%d]\n",type);
+   		break;
+   	default:
+   		perror("unknown exposure type");
+   	}
+#endif
+}
+
+/*
+V4L2_EXPOSURE_MANUAL and V4L2_EXPOSURE_APERTURE_PRIORITY are commonly used.
+*/
+int SetAutoExposure(int fd, int type)
+{
+	struct v4l2_control ctrl ={0};
+	ctrl.id = V4L2_CID_EXPOSURE_AUTO;
+   	ctrl.value = type;
+   	printf("SetAutoExposure=");
+   	autoExposureType(type);
+   	if (-1 == xioctl(fd,VIDIOC_S_CTRL,&ctrl)) {
+      perror("setting V4L2_CID_EXPOSURE_AUTO");
+      return -1;
+	}
+	return type;
+}
+
+int GetAutoExposure(int fd)
+{
+	struct v4l2_control ctrl ={0};
+	ctrl.id = V4L2_CID_EXPOSURE_AUTO;
+	if (-1 == xioctl(fd, VIDIOC_G_CTRL, &ctrl)){
+		perror("getting V4L2_CID_EXPOSURE_AUTO");
+		return -1;
+	}
+	printf("GetAutoExposure=");
+	autoExposureType(ctrl.value);
+	return ctrl.value;
+}
+
+int SetAutoExposureAutoPriority(int fd, int p)
+{
+	struct v4l2_control ctrl ={0};
+	ctrl.id = V4L2_CID_EXPOSURE_AUTO_PRIORITY ;
+   	ctrl.value = p;
+   	if (-1 == xioctl(fd,VIDIOC_S_CTRL,&ctrl)) {
+      perror("setting V4L2_CID_EXPOSURE_AUTO_PRIORITY");
+      return -1;
+	}
+	return p;
+}
+
+int GetAutoExposureAutoPriority(int fd)
+{
+	struct v4l2_control ctrl ={0};
+	ctrl.id = V4L2_CID_EXPOSURE_AUTO_PRIORITY ;
+   	if (-1 == xioctl(fd,VIDIOC_G_CTRL,&ctrl)) {
+      perror("getting V4L2_CID_EXPOSURE_AUTO_PRIORITY");
+      return -1;
+	}
+	return ctrl.value;
+}
+
+/*
+	The exposure time is limited by the frame interval. Drivers should interpret
+	the values as 100 µs units, where the value 1 stands for 1/10000th of a second,
+	10000 for 1 second and 100000 for 10 seconds.
+	if 30fps is the goal, each frame takes 1/30s = 33ms = 33*10*100us =
+	330 * 100us. It depends on the ambient light to tuning exposure time.
+*/
+int SetManualExposure(int fd, int val)
+{
+	struct v4l2_control ctrl ={0};
+	if(SetAutoExposure(fd, V4L2_EXPOSURE_MANUAL) != V4L2_EXPOSURE_MANUAL){
+		perror("setting V4L2_EXPOSURE_MANUAL");
+		return -1;
+	}
+
+	ctrl.id = V4L2_CID_EXPOSURE_ABSOLUTE;
+   	ctrl.value = val;
+   	if (-1 == xioctl(fd,VIDIOC_S_CTRL,&ctrl)) {
+      perror("setting V4L2_CID_EXPOSURE_ABSOLUTE");
+      return -1;
+	}
+	return val;
+}
+
+int GetManualExposure(int fd)
+{
+	struct v4l2_control ctrl ={0};
+/*	if(GetAutoExposure(fd) != V4L2_EXPOSURE_MANUAL){
+		perror("SetManualExposure is not in V4L2_EXPOSURE_MANUAL");
+		return -1;
+	}
+*/
+	ctrl.id = V4L2_CID_EXPOSURE_ABSOLUTE;
+   	if (-1 == xioctl(fd,VIDIOC_G_CTRL,&ctrl)) {
+      perror("getting V4L2_EXPOSURE_MANUAL");
+      return -1;
+	}
+	printf("GetManualExposure=%d\n",ctrl.value);
+	return ctrl.value;
+}
+
+int EnumVideoFMT(int fd)
+{
+	int support_grbg10 = 0;
+	struct v4l2_fmtdesc fmtdesc = {0};
+    fmtdesc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    char fourcc[5] = {0};
+    char c, e;
+    printf("\n  FMT : CE Desc\n--------------------\n");
+    while (0 == xioctl(fd, VIDIOC_ENUM_FMT, &fmtdesc))
+    {
+        strncpy(fourcc, (char *)&fmtdesc.pixelformat, 4);
+        if (fmtdesc.pixelformat == V4L2_PIX_FMT_SGRBG10)
+            support_grbg10 = 1;
+        c = fmtdesc.flags & 1? 'C' : ' ';
+        e = fmtdesc.flags & 2? 'E' : ' ';
+        printf("  %s: [%c][%c], [%s]\n", fourcc, c, e, fmtdesc.description);
+        fmtdesc.index++;
+    }
+}
+
+int GetVideoFMT(int fd, struct v4l2_format *pfmt)
+{
+    int i;
+//    struct v4l2_format fmt = {0};
+    char fourcc[5] = {0};
+    pfmt->type = V4L2_BUF_TYPE_VIDEO_CAPTURE; //V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+	for(i = 0; i < 20; i ++){
+		if (-1 == xioctl(fd, VIDIOC_G_FMT, pfmt))
+		{
+		    perror("getting Pixel Format");
+			usleep(5000);
+			continue;
+		}else{
+		strncpy(fourcc, (char *)&pfmt->fmt.pix.pixelformat, 4);
+		printf( "Gotten Camera Mode:\n"
+		    "  Width: %d\n"
+		    "  Height: %d\n"
+		    "  PixFmt: %s\n"
+		    "  Field: %d\n"
+		    "  priv: 0x%x\n",
+		    pfmt->fmt.pix.width,
+		    pfmt->fmt.pix.height,
+		    fourcc,
+		    pfmt->fmt.pix.field,
+		    pfmt->fmt.pix.priv);
+		    break;
+		}
+	}
+}
+
+/*
+http://permalink.gmane.org/gmane.linux.drivers.uvc.devel/4537
+You can't change the format, VIDIOC_S_FMT, while buffers are allocated. 
+You need to free the buffers before, using VIDIOC_REQBUFS with a buffer count of 0.
+*/
+int SetVideoFMT(int fd, struct v4l2_format fmt)
+{
+    int i;
+//    struct v4l2_format fmt = {0};
+    char fourcc[5] = {0};
+    fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+//    fmt.fmt.pix.width = 640;
+//    fmt.fmt.pix.height = 480;
+    //fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_BGR24;
+    //fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_GREY;
+//    fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+//    fmt.fmt.pix.pixelformat = pixelformat;//V4L2_PIX_FMT_YUYV;
+//    fmt.fmt.pix.field = V4L2_FIELD_NONE;
+//	for(i = 0; i < 20; i ++){
+		if (-1 == xioctl(fd, VIDIOC_S_FMT, &fmt))
+		{
+		    perror("Setting Pixel Format");
+			//usleep(10000);
+			//continue;
+		}else{
+		strncpy(fourcc, (char *)&fmt.fmt.pix.pixelformat, 4);
+		printf( "Selected Camera Mode:\n"
+		    "  Width: %d\n"
+		    "  Height: %d\n"
+		    "  PixFmt: %s\n"
+		    "  Field: %d\n",
+		    fmt.fmt.pix.width,
+		    fmt.fmt.pix.height,
+		    fourcc,
+		    fmt.fmt.pix.field);
+		    //break;
+		}
+	//}
+	return 0;
+}
+
+void SetFPSParam(int fd, uint32_t fps) 
+{
+	struct v4l2_streamparm param;
+    memset(&param, 0, sizeof(param));
+    param.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    param.parm.capture.timeperframe.numerator = 1;
+    param.parm.capture.timeperframe.denominator = fps;  
+	if (-1 == xioctl(fd, VIDIOC_S_PARM, &param)){
+		perror("unable to change device parameters");
+		return ;
+	}
+
+	if(param.parm.capture.timeperframe.numerator){
+		double fps_new = param.parm.capture.timeperframe.denominator
+	                 / param.parm.capture.timeperframe.numerator;
+		if ((double)fps != fps_new) {
+			printf("unsupported frame rate [%d,%f]\n", fps, fps_new);
+			return;
+		}else{
+			printf("new fps:%u , %u/%u\n",fps, param.parm.capture.timeperframe.denominator,
+			param.parm.capture.timeperframe.numerator);
+		}
+	}
+}
+
+uint32_t GetFPSParam(int fd, double fps, struct v4l2_frmivalenum *pfrmival)
+{
+    struct v4l2_frmivalenum frmival[10];
+    float fpss[10];
+    int i=0;
+/*
+    memset(&frmival,0,sizeof(frmival));
+    frmival.pixel_format = fmt;
+    frmival.width = width;
+    frmival.height = height;*/
+    memset(fpss,0,sizeof(fpss));
+    while(pfrmival->index < 10){
+	    if (-1 == xioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, pfrmival)){
+		    perror("getting VIDIOC_ENUM_FRAMEINTERVALS");
+		    break;
+		}
+		frmival[pfrmival->index] = *pfrmival;
+        if (pfrmival->type == V4L2_FRMIVAL_TYPE_DISCRETE){
+	    	double f;
+        	f = (double)pfrmival->discrete.denominator/pfrmival->discrete.numerator;
+        	printf("[%u/%u]\n", pfrmival->discrete.denominator, 
+        						pfrmival->discrete.numerator);
+            printf("[%dx%d] %f fps\n", pfrmival->width, pfrmival->height,f);
+            
+			fpss[pfrmival->index]=f;
+			frmival[pfrmival->index]=*pfrmival;
+        }else{
+        	double f1,f2;
+        	f1 = (double)pfrmival->stepwise.max.denominator/pfrmival->stepwise.max.numerator;
+        	f2 = (double)pfrmival->stepwise.min.denominator/pfrmival->stepwise.min.numerator;
+            printf("[%dx%d] [%f,%f] fps\n", pfrmival->width, pfrmival->height,f1,f2);
+       	}
+       	printf("idx=%d\n", pfrmival->index);
+       	pfrmival->index++;
+    }
+    /* list is in increasing order */
+    if(pfrmival->index){
+    	i = pfrmival->index;
+	    while(--i >= 0){
+    		if(fps <= fpss[i] ){
+    			break;
+    		}
+    	}
+    	*pfrmival = frmival[i];
+    	printf("found[%f,%f]\n", fps, fpss[i]);
+    }
+    return (uint32_t)fpss[i];
+}
+
+int PrintFrameInterval(int fd, unsigned int fmt, unsigned int width, unsigned int height)
+{
+    struct v4l2_frmivalenum frmival;
+    memset(&frmival,0,sizeof(frmival));
+    frmival.pixel_format = fmt;
+    frmival.width = width;
+    frmival.height = height;
+    while(1){
+	    if (-1 == xioctl(fd, VIDIOC_ENUM_FRAMEINTERVALS, &frmival)){
+		    perror("getting VIDIOC_ENUM_FRAMEINTERVALS");
+		    return -1;
+		}
+
+        if (frmival.type == V4L2_FRMIVAL_TYPE_DISCRETE){
+           	printf("[%u/%u]\n", frmival.discrete.denominator, 
+        						frmival.discrete.numerator);
+            printf("[%dx%d] %f fps\n", width, height,
+            1.0*frmival.discrete.denominator/frmival.discrete.numerator);
+		}else
+            printf("[%dx%d] [%f,%f] fps\n", width, height,
+            1.0*frmival.stepwise.max.denominator/frmival.stepwise.max.numerator,
+            1.0*frmival.stepwise.min.denominator/frmival.stepwise.min.numerator);
+        frmival.index++;
+    }
+    return 0;
+}
+
+int EnumFrameRate(int fd, unsigned int format)
+{
+    unsigned int width=0, height=0;;
+    struct v4l2_frmsizeenum frmsize;
+    memset(&frmsize,0,sizeof(frmsize));
+    frmsize.pixel_format = format; //V4L2_PIX_FMT_JPEG;
+	printf("\nEnumFrameRate:\n");
+    while(1){
+	    if (-1 == xioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize)){
+		    perror("getting VIDIOC_ENUM_FRAMESIZES");
+		    return -1;
+		}
+		printf("frmsize.type=%d\n", frmsize.type);
+        if (frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE){
+            PrintFrameInterval(fd, frmsize.pixel_format, frmsize.discrete.width, 
+            frmsize.discrete.height);
+        }else{
+            for (width=frmsize.stepwise.min_width; width< frmsize.stepwise.max_width; 
+            	width+=frmsize.stepwise.step_width)
+                for (height=frmsize.stepwise.min_height; 
+                	height< frmsize.stepwise.max_height; 
+                	height+=frmsize.stepwise.step_height)
+                    PrintFrameInterval(fd, frmsize.pixel_format, width, height);
+        }
+        frmsize.index++;
+    }
+    return 0;
+}
+
+int print_caps(int fd)
+{
+    struct v4l2_capability caps = {0};
+    struct v4l2_cropcap cropcap = {0};
+
+    if (!QueryCap(fd, &caps)){
+	    printf( "Driver Caps:\n"
+            "  Driver: \"%s\"\n"
+            "  Card: \"%s\"\n"
+            "  Bus: \"%s\"\n"
+            "  Version: %d.%d\n"
+            "  Capabilities: %08x\n",
+            caps.driver,
+            caps.card,                caps.bus_info,
+            (caps.version>>16)&&0xff,
+            (caps.version>>24)&&0xff,
+            caps.capabilities);
+	}
+
+    if (!QueryCropCap(fd, &cropcap)){
+    	printf( "Camera Cropping:\n"
+        "  Bounds: %dx%d+%d+%d\n"
+        "  Default: %dx%d+%d+%d\n"
+        "  Aspect: %d/%d\n",
+        cropcap.bounds.width, cropcap.bounds.height, cropcap.bounds.left, cropcap.bounds.top,
+        cropcap.defrect.width, cropcap.defrect.height, cropcap.defrect.left, cropcap.defrect.top,
+        cropcap.pixelaspect.numerator, cropcap.pixelaspect.denominator);
+	}
+    EnumVideoFMT(fd);
+    //int support_grbg10 = 0;
+    /*
+    if (!support_grbg10)
+    {
+        printf("Doesn't support GRBG10.\n");
+        return 1;
+    }*/
+
+	GetAutoWhiteBalance(fd);
+
+    return 0;
+}
+
+/* openCV cvCaptureFromCAM will lock the /dev/videoxxx, so the VIDIOC_S_FMT
+can't work.
+Set the capture format before openCV open the camera device.
+*/
+int extra_cam_setting(int camfd)
+{
+	struct v4l2_format fmt;
+	struct v4l2_frmivalenum frmival;
+	uint32_t fps;
+
+	print_caps(camfd);
+	GetVideoFMT(camfd, &fmt);
+	EnumFrameRate(camfd, V4L2_PIX_FMT_YUYV);
+
+	memset(&frmival,0,sizeof(frmival));
+    frmival.pixel_format = V4L2_PIX_FMT_YUYV;
+    frmival.width = FORCED_WIDTH;
+    frmival.height = FORCED_HEIGHT;
+	fps = GetFPSParam(camfd, (double)FORCED_FPS, &frmival);
+	SetFPSParam(camfd, fps);
+
+	GetAutoExposure(camfd);
+	SetAutoExposure(camfd, /*V4L2_EXPOSURE_MANUAL ,*/ V4L2_EXPOSURE_APERTURE_PRIORITY  );
+	SetAutoExposureAutoPriority(camfd,0);
+	printf("AutoPriority=%d\n",GetAutoExposureAutoPriority(camfd));
+//	PrintFrameInterval(camfd, frmival.pixel_format, frmival.width, frmival.height);
+//	SetAutoExposure(camfd, V4L2_EXPOSURE_MANUAL);
+	SetManualExposure(camfd, 110);
+	GetManualExposure(camfd);
+}
+
 /*http://www.jayrambhia.com/blog/capture-v4l2
 Step 7: Store data in OpenCV datatype
     IplImage* frame;
@@ -89,66 +599,59 @@ Step 7: Store data in OpenCV datatype
     cvShowImage("window", frame);
 */
 
-void process_webcam_frames(int camfd, const void *p, int size)
+/* convert from 4:2:2 YUYV interlaced to RGB24 */
+/* based on ccvt_yuyv_bgr32() from camstream */
+/* opencv/modules/highgui/src/cap_v4l.cpp */
+#define SAT(c) \
+        if (c & (~255)) { if (c < 0) c = 0; else c = 255; }
+
+//TODO : this can't be optimized by SIMD, openMP, opencl???
+static void
+yuyv_to_rgb24 (int width, int height, unsigned char *src, unsigned char *dst)
 {
-	static uint64_t ut1;
-	CvCapture* capture;
-	uint32_t fps;
-	IplImage* frame=NULL;
-	IplImage* framecopy=NULL;
-	struct timeval pt1, pt2;
-	uint64_t ut2;
-	const char* windowname = "webcam";
+	unsigned char *s;
+	unsigned char *d;
+	int l, c;
+	int r, g, b, cr, cg, cb, y1, y2;
+	
+	pr_debug("%s: called!, width=%d, height=%d\n", __func__, width, height);
 
-//	preset_cam(camfd);
-//	postset_cam(camfd);
+	l = height;
+	s = src;
+	d = dst;
+	while (l--) {
+		c = width >> 1;
+		while (c--) {
+			 y1 = *s++;
+			 cb = ((*s - 128) * 454) >> 8;
+			 cg = (*s++ - 128) * 88;
+			 y2 = *s++;
+			 cr = ((*s - 128) * 359) >> 8;
+			 cg = (cg + (*s++ - 128) * 183) >> 8;
 
-	// start the main loop in which we'll process webcam output
-	framecopy = 0;
-	cvNamedWindow(windowname,CV_WINDOW_AUTOSIZE);
-	while(1)
-	{
-		frame = cvRetrieveFrame(capture, 1);
+			 r = y1 + cr;
+			 b = y1 + cb;
+			 g = y1 - cg;
+			 SAT(r);
+			 SAT(g);
+			 SAT(b);
 
-		//processing is done
-		gettimeofday(&pt2, NULL);
-		ut2 = (pt2.tv_sec * 1000000) + pt2.tv_usec;
-		if( ut1 && (ut2 > ut1)){
-//			printf("\npt=%lu us, fps=%.1f\n", ut2-ut1, 1000000.0/(ut2-ut1));
-			printf("fps=%.0f\n", 1000000.0/(ut2-ut1));
-		}
-		ut1=ut2;
+			*d++ = b;
+			*d++ = g;
+			*d++ = r;
 
-		// wait 5 miliseconds
-		int key = cvWaitKey(1);
+			 r = y2 + cr;
+			 b = y2 + cb;
+			 g = y2 - cg;
+			 SAT(r);
+			 SAT(g);
+			 SAT(b);
 
-		// we terminate the loop if we don't get any data from the webcam or the user has pressed 'q'
-		if(!frame || key=='q')
-			break;
-		else
-		{
-			// we mustn't tamper with internal OpenCV buffers and that's the reason why we're making a copy of the current frame
-			//framecopy = cvCloneImage(frame);
-			if(!framecopy)
-				framecopy = cvCreateImage(cvSize(frame->width, frame->height), frame->depth, frame->nChannels);
-			cvCopy(frame, framecopy, 0);
-
-			// webcam outputs mirrored frames (at least on my machines); you can safely comment out this line if you find it unnecessary
-			//cvFlip(framecopy, framecopy, 1);
-
-			// display the image to the user
-			cvShowImage(windowname, framecopy);
+			*d++ = b;
+			*d++ = g;
+			*d++ = r;
 		}
 	}
-//exit:
-	// cleanup
-	if(framecopy)
-		cvReleaseImage(&framecopy);
-	if(frame)
-		cvReleaseImage(&frame);
-
-	cvReleaseCapture(&capture);
-	cvDestroyWindow(windowname);
 }
 
 /*
@@ -161,13 +664,13 @@ static void process_image(const void *p, int size)
 	uint64_t ut2;
 	struct timeval pt2;
 	pr_debug("%s: called!, size=0x%x\n", __func__, size);
-	
-	if (out_buf)
-		fwrite(p, size, 1, stdout);
 
-#if 1 	//V4L2_PIX_FMT_MJPEG
+//	if (out_buf)
+//		fwrite(p, size, 1, stdout);
+
+#if 0 	//V4L2_PIX_FMT_MJPEG
     IplImage* frame;
-    CvMat cvmat = cvMat(480, 640, CV_8UC3, (void*)p);//RGB only for MJPEG
+    CvMat cvmat = cvMat(480, 640, CV_8UC3, (void*)p);//MJPEG buffer p
     frame = cvDecodeImage(&cvmat, 1);//sometimes a corrupted frame is retrieved,
     								//so frame should be checked if it's null.
 	if(frame && !framecopy){
@@ -190,21 +693,23 @@ static void process_image(const void *p, int size)
 //		printf("size too small\n");
 //		return ;
 //	}
-
-    cvCvtColor(frame, );
-    CvMat cvmat = cvMat(480, 640,  CV_8UC2, (void*)p);//V4L2_PIX_FMT_YUYV, 16bits
+	framecopy = cvCreateImage(cvSize(640,480), IPL_DEPTH_8U, 3);
+	yuyv_to_rgb24(640,480, p, framecopy->imageData);
+   	cvShowImage(windowname, framecopy);
+//    cvCvtColor(frame, );
+//    CvMat cvmat = cvMat(480, 640,  CV_8UC2, (void*)p);//V4L2_PIX_FMT_YUYV, 16bits
 #endif
 	gettimeofday(&pt2, NULL);
 	ut2 = (pt2.tv_sec * 1000000) + pt2.tv_usec;
 	if( ut1 && (ut2 > ut1)){
 //			printf("\npt=%lu us, fps=%.1f\n", ut2-ut1, 1000000.0/(ut2-ut1));
-		printf("fps=%.0f\n", 1000000.0/(ut2-ut1));
+		pr_debug("fps=%.0f\n", 1000000.0/(ut2-ut1));
 	}
 	ut1=ut2;
 
-	fflush(stderr);
-	fprintf(stderr, ".");
-	fflush(stdout);
+//	fflush(stderr);
+//	fprintf(stderr, ".");
+//	fflush(stdout);
 }
 
 static int read_frame(void)
@@ -334,7 +839,7 @@ static void mainloop(void)
 				exit(EXIT_FAILURE);
 			}
 
-			if( (ch=cvWaitKey(2)) =='q') //this waitkey pause can make CV display visible
+			if( (ch=cvWaitKey(1)) =='q') //this waitkey pause can make CV display visible
 				goto exit;
 
 			if (read_frame())
@@ -721,7 +1226,12 @@ static void init_device(void)
 				(fmt.fmt.pix.pixelformat >> 24) & 0xFF
 				);
 		pr_debug("\n");
-
+		/*
+		This, VIDIOC_S_FMT, is one time setting, so you can NOT set twice.
+		You can't change the format while buffers are allocated. 
+		You need to free the buffers before, using VIDIOC_REQBUFS with a buffer
+		count of 0.
+		*/
 		if (-1 == xioctl(fd, VIDIOC_S_FMT, &fmt))
 			errno_exit("VIDIOC_S_FMT");
 
@@ -748,6 +1258,8 @@ static void init_device(void)
 	min = fmt.fmt.pix.bytesperline * fmt.fmt.pix.height;
 	if (fmt.fmt.pix.sizeimage < min)
 		fmt.fmt.pix.sizeimage = min;
+
+	extra_cam_setting(fd);
 
 	switch (io) {
 	case IO_METHOD_READ:
@@ -900,13 +1412,18 @@ int main(int argc, char **argv)
 
 	open_device();
 	init_device();
+
 	cvNamedWindow(windowname,CV_WINDOW_AUTOSIZE);
+
 	start_capturing();
 	mainloop();
 	stop_capturing();
+
 	cvDestroyWindow(windowname);
+
 	uninit_device();
 	close_device();
+	
 	fprintf(stderr, "\n");
 	return 0;
 }
