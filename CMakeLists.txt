@@ -14,11 +14,14 @@ set(OpenCV_DIR "/home/thomas/build/biotrump-cv/out/openCV/2.4.9.x-static")
 #set(OpenCV_DIR "/home/thomas/build/openCV/2.4.9-static")
 FIND_PACKAGE( OpenCV REQUIRED)
 
+#$ENV{VAR} to get shell env
+set(V4L2_LIB_DIR $ENV{V4L2_LIB_DIR})
+set(V4L2_LIB_OUT $ENV{V4L2_LIB_OUT} )
 #my mozilla PC
-set(V4L2_DIR "/home/thomas/build/biotrump-cv/v4l2-lib")
+#set(V4L2_DIR "/home/thomas/build/biotrump-cv/v4l2-lib")
 #FIND_PACKAGE( V4L2 REQUIRED)
 
-include_directories(${V4L2_DIR})
+#include_directories(${V4L2_DIR})
 
 #openMP to avoid link error : omp_xxx error!
 # undefined reference to `GOMP_loop_dynamic_start
